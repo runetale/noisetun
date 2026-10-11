@@ -1,0 +1,101 @@
+name: mobile
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The library as an app embeds it (the wg_tunnel_* API). Built, not run:
+# the tests need a device.
+jobs:
+  android:
+    name: android-${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            triple: aarch64-linux-android
+          - abi: x86_64
+            triple: x86_64-linux-android
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: libsodium for Android (static)
+        run: |
+          NDK="$ANDROID_NDK_LATEST_HOME"
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git /tmp/libsodium
+          cd /tmp/libsodium
+          ./configure -q --host=${{ matrix.triple }} --prefix=/tmp/sodium \
+            --disable-shared --enable-static --with-pic \
+            CC="$TC/${{ matrix.triple }}24-clang" AR="$TC/llvm-ar" RANLIB="$TC/llvm-ranlib"
+          make -s -j"$(nproc)" install
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_LATEST_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=${{ matrix.abi }} -DANDROID_PLATFORM=android-24 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSODIUM_INCLUDE_DIR=/tmp/sodium/include \
+            -DSODIUM_LIBRARY=/tmp/sodium/lib/libsodium.a \
+            -DWG_USE_OPENSSL=OFF -DWG_ASAN=OFF
+
+      - name: Build (library, tools, tests)
+        run: cmake --build build -j"$(nproc)"
+
+  apple:
+    name: ${{ matrix.name }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: ios-arm64
+            system: iOS
+            sysroot: iphoneos
+          - name: ios-simulator-arm64
+            system: iOS
+            sysroot: iphonesimulator
+    steps:
+      - uses: actions/checkout@v4
+
+      # The static library needs libsodium's headers only; the app links
+      # its own libsodium build.
+      - name: libsodium headers
+        run: |
+          git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git /tmp/libsodium
+          cd /tmp/libsodium && ./configure -q   # generates sodium/version.h
+          mkdir -p /tmp/sodium && cp -R src/libsodium/include /tmp/sodium/
+
+      - name: Configure
+        run: |
+          cmake -B build \
+            -DCMAKE_SYSTEM_NAME=${{ matrix.system }} \
+            -DCMAKE_OSX_SYSROOT=${{ matrix.sysroot }} \
+            -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=15.0 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_FLAGS=-Werror=unguarded-availability-new \
+            -DSODIUM_INCLUDE_DIR=/tmp/sodium/include \
+            -DSODIUM_LIBRARY=/dev/null \
+            -DWG_USE_OPENSSL=OFF -DWG_ASAN=OFF \
+            -DWG_BUILD_TESTS=OFF -DWG_BUILD_TOOLS=OFF
+
+      # -Werror=unguarded-availability-new: an OS call newer than the
+      # deployment target must be checked at run time.
+      - name: Build (library)
+        run: cmake --build build --target wireguard -j"$(sysctl -n hw.ncpu)"
+
+      # Nothing links the library here, so check that every wg_ symbol it
+      # uses is also defined in it (a source left out for this platform
+      # would otherwise only show up when an app links it).
+      - name: Self-contained
+        run: |
+          nm build/libwireguard.a | awk '$1=="U" && $2 ~ /^_wg_/ {print $2}' | sort -u > undefined.txt
+          nm build/libwireguard.a | awk '$2 ~ /^[TDBSC]$/ && $3 ~ /^_wg_/ {print $3}' | sort -u > defined.txt
+          missing=$(comm -23 undefined.txt defined.txt)
+          if [ -n "$missing" ]; then echo "undefined in libwireguard.a:"; echo "$missing"; exit 1; fi

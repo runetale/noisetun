@@ -1,0 +1,54 @@
+noisetun
+Copyright (C) 2025-2026 Runetale Inc.
+Copyright (C) 2025-2026 gx14ac
+
+This product includes software developed at Runetale Inc.
+
+"WireGuard" is a registered trademark of Jason A. Donenfeld.
+
+third_party/wintun contains unmodified Wintun 0.14.1 release files
+(https://www.wintun.net/), Copyright (C) 2018-2021 WireGuard LLC:
+  - */wintun.dll: Wintun Prebuilt Binaries License
+    (third_party/wintun/LICENSE.txt)
+  - include/wintun.h: GPL-2.0 OR MIT (SPDX tag in the file)
+These files are not covered by the Apache License 2.0.
+
+Portions of this software are derived from wireguard-go
+(https://git.zx2c4.com/wireguard-go), including src/replay/wg_replay.c,
+which is a port of wireguard-go's replay/replay.go. wireguard-go is
+distributed under the MIT License:
+
+    Copyright (C) 2017-2025 WireGuard LLC. All Rights Reserved.
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy of
+    this software and associated documentation files (the "Software"), to deal in
+    the Software without restriction, including without limitation the rights to
+    use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+    of the Software, and to permit persons to whom the Software is furnished to do
+    so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+src/device/wg_prev_queue.c follows the intrusive MPSC node-based queue
+by Dmitry Vyukov, published at 1024cores.net
+(https://sites.google.com/site/1024cores/home/lock-free-algorithms/queues/intrusive-mpsc-node-based-queue).
+Its source code is offered under the Simplified BSD License and the
+Apache License, Version 2.0; it is used here under the Apache License,
+Version 2.0.
+
+src/noise/wg_noise.c is written from the Noise Protocol Framework
+(revision 34) and the WireGuard whitepaper. Its layout, each handshake
+message spelled out step by step with the whitepaper's formulas beside it,
+follows BoringTun's src/noise/handshake.rs
+(https://github.com/cloudflare/boringtun), Copyright (c) 2019 Cloudflare,
+Inc., distributed under the BSD 3-Clause License. No BoringTun code is
+included.

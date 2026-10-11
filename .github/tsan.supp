@@ -1,0 +1,7 @@
+# TSan suppression file for noisetun
+#
+# libsodium's CSPRNG (randombytes_linux_getrandom) triggers a false
+# positive inside the getrandom() wrapper — the access is safe but TSan
+# cannot see the kernel-side synchronisation.
+race:randombytes_linux_getrandom
+race:getrandom

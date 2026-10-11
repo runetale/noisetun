@@ -1,0 +1,8 @@
+private_key=e848d06297b1f8bbf0d461a3c61e8c3de99e50c90ebc5b53ee137c7fc2b0d8a4
+listen_port=51820
+fwmark=0
+replace_peers=true
+public_key=b01a7e22579b9b2e5a2c6820c0b3c7ac5ab214334d4cf6a14a639489ee7a9b0e
+endpoint=1.2.3.4:9999
+allowed_ip=10.0.0.0/24
+persistent_keepalive_interval=25

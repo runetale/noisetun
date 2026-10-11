@@ -1,0 +1,50 @@
+# The library's C sources, one per line: <path> <platforms>
+#
+# platforms is one of:
+#   all      every platform
+#   posix    Linux, Android and Apple platforms (not Windows)
+#   linux    Linux and Android
+#   apple    macOS, iOS, tvOS and visionOS
+#   windows  Windows (MSVC or MinGW-w64)
+#
+# CMakeLists.txt builds from this list. Other build systems that compile
+# noisetun from source (a Zig build.zig, say) can read it too instead of
+# keeping a copy; see docs/embedding.md.
+
+src/crypto/wg_crypto.c             all
+src/noise/wg_noise.c               all
+src/noise/wg_keypair.c             all
+src/session/wg_session.c           all
+src/peer/wg_peer.c                 all
+src/peer/wg_allowedips.c           all
+src/peer/wg_peerlookup.c           all
+src/peer/wg_indextable.c           all
+src/transport/wg_transport.c       all
+src/replay/wg_replay.c             all
+src/cookie/wg_cookie.c             all
+src/ratelimiter/wg_ratelimiter.c   all
+src/timers/wg_timers.c             all
+src/device/wg_device.c             all
+src/device/wg_pools.c              all
+src/device/wg_prev_queue.c         all
+src/device/wg_queue.c              all
+src/device/wg_spsc.c               all
+src/device/wg_logger.c             all
+src/workers/wg_send.c              all
+src/workers/wg_receive.c           all
+src/workers/wg_handshake.c         all
+src/tun/wg_tun.c                   all
+src/tun/wg_tun_channel.c           all
+src/tun/wg_tun_linux.c             linux
+src/tun/wg_tun_offload_linux.c     linux
+src/tun/wg_tun_darwin.c            apple
+src/tun/wg_tun_windows.c           windows
+src/rwcancel/wg_rwcancel.c         all
+src/rwcancel/wg_rwcancel_win.c     windows
+src/bind/wg_bind.c                 all
+src/bind/wg_bind_std.c             posix
+src/bind/wg_bind_win.c             windows
+src/uapi/wg_uapi.c                 all
+src/uapi/wg_uapi_server.c          posix
+src/uapi/wg_uapi_server_win.c      windows
+src/tunnel/wg_tunnel.c             posix

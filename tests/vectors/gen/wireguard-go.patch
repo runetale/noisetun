@@ -1,0 +1,67 @@
+diff --git a/device/indextable.go b/device/indextable.go
+index 2460fa6..05f8d3b 100644
+--- a/device/indextable.go
++++ b/device/indextable.go
+@@ -22,6 +22,9 @@ type IndexTable struct {
+ 	table map[uint32]IndexTableEntry
+ }
+ 
++// Source of handshake indices; tests may replace it.
++var newHandshakeIndex = randUint32
++
+ func randUint32() (uint32, error) {
+ 	var integer [4]byte
+ 	_, err := rand.Read(integer[:])
+@@ -59,7 +62,7 @@ func (table *IndexTable) NewIndexForHandshake(peer *Peer, handshake *Handshake)
+ 	for {
+ 		// generate random index
+ 
+-		index, err := randUint32()
++		index, err := newHandshakeIndex()
+ 		if err != nil {
+ 			return index, err
+ 		}
+diff --git a/device/noise-protocol.go b/device/noise-protocol.go
+index 5cf1702..b71d2b7 100644
+--- a/device/noise-protocol.go
++++ b/device/noise-protocol.go
+@@ -19,6 +19,12 @@ import (
+ 	"golang.zx2c4.com/wireguard/tai64n"
+ )
+ 
++// Sources of randomness and time for the handshake; tests may replace them.
++var (
++	newEphemeralKey = newPrivateKey
++	handshakeNow    = tai64n.Now
++)
++
+ type handshakeState int
+ 
+ const (
+@@ -279,7 +285,7 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
+ 	var err error
+ 	handshake.hash = InitialHash
+ 	handshake.chainKey = InitialChainKey
+-	handshake.localEphemeral, err = newPrivateKey()
++	handshake.localEphemeral, err = newEphemeralKey()
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -320,7 +326,7 @@ func (device *Device) CreateMessageInitiation(peer *Peer) (*MessageInitiation, e
+ 		handshake.chainKey[:],
+ 		handshake.precomputedStaticStatic[:],
+ 	)
+-	timestamp := tai64n.Now()
++	timestamp := handshakeNow()
+ 	aead, _ = chacha20poly1305.New(key[:])
+ 	aead.Seal(msg.Timestamp[:0], ZeroNonce[:], timestamp[:], handshake.hash[:])
+ 
+@@ -466,7 +472,7 @@ func (device *Device) CreateMessageResponse(peer *Peer) (*MessageResponse, error
+ 
+ 	// create ephemeral key
+ 
+-	handshake.localEphemeral, err = newPrivateKey()
++	handshake.localEphemeral, err = newEphemeralKey()
+ 	if err != nil {
+ 		return nil, err
+ 	}

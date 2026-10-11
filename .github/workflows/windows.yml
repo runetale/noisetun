@@ -1,0 +1,115 @@
+name: windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: windows-${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            msvc_arch: amd64_arm64
+            triplet: arm64-windows-static
+            cmake_proc: ARM64
+          - arch: x64
+            msvc_arch: amd64
+            triplet: x64-windows-static
+            cmake_proc: AMD64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: libsodium (vcpkg, static)
+        shell: pwsh
+        run: |
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install libsodium --triplet ${{ matrix.triplet }}
+          "SODIUM_ROOT=$env:VCPKG_INSTALLATION_ROOT\installed\${{ matrix.triplet }}" >> $env:GITHUB_ENV
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
+
+      - name: Configure
+        shell: pwsh
+        run: |
+          cmake -B build -G Ninja `
+            -DCMAKE_C_COMPILER=cl.exe `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded `
+            -DCMAKE_SYSTEM_NAME=Windows `
+            -DCMAKE_SYSTEM_PROCESSOR=${{ matrix.cmake_proc }} `
+            -DSODIUM_INCLUDE_DIR="$env:SODIUM_ROOT\include" `
+            -DSODIUM_LIBRARY="$env:SODIUM_ROOT\lib\libsodium.lib" `
+            -DWG_BUILD_TESTS=ON -DWG_BUILD_BENCH=OFF -DWG_BUILD_TOOLS=ON `
+            -DWG_USE_OPENSSL=OFF -DWG_ASAN=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      # The x64 runner can run x64 binaries only; arm64 tests are uploaded.
+      - name: Test
+        if: matrix.arch == 'x64'
+        run: ctest --test-dir build --output-on-failure --timeout 300
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wg-c-tests-windows-${{ matrix.arch }}
+          path: build/tests/*.exe
+          if-no-files-found: error
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wg-c-windows-${{ matrix.arch }}
+          path: |
+            build/tools/wg-c.exe
+            build/tools/wintun.dll
+          if-no-files-found: error
+
+  # Cross-compiled from Linux with MinGW-w64 (cmake/mingw-w64.cmake); the
+  # tests run under Wine.
+  mingw:
+    name: mingw-x64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Toolchain
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends mingw-w64 cmake ninja-build wine wine64
+
+      - name: libsodium for MinGW (static)
+        run: |
+          git clone -q --depth 1 --branch 1.0.20-RELEASE https://github.com/jedisct1/libsodium.git /tmp/libsodium
+          cd /tmp/libsodium
+          ./configure -q --host=x86_64-w64-mingw32 --prefix=/tmp/sodium-mingw --disable-shared --enable-static
+          make -s -j"$(nproc)" install
+
+      - name: Configure
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CROSSCOMPILING_EMULATOR=wine \
+            -DSODIUM_INCLUDE_DIR=/tmp/sodium-mingw/include \
+            -DSODIUM_LIBRARY=/tmp/sodium-mingw/lib/libsodium.a \
+            -DWG_BUILD_TESTS=ON -DWG_BUILD_TOOLS=ON \
+            -DWG_USE_OPENSSL=OFF -DWG_ASAN=OFF
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test (Wine)
+        env:
+          WINEDEBUG: -all
+        run: |
+          # MinGW runtime DLLs (libwinpthread, libgcc) for binaries that link them dynamically
+          export WINEPATH="$(dirname "$(x86_64-w64-mingw32-gcc -print-libgcc-file-name)");/usr/x86_64-w64-mingw32/lib"
+          wineboot -i >/dev/null 2>&1 || true
+          ctest --test-dir build --output-on-failure --timeout 300

@@ -1,0 +1,156 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ──────────────────────────────────────────
+  # Lint: clang-format check
+  # ──────────────────────────────────────────
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clang-format
+        run: pip install clang-format==21.1.7
+
+      - name: Check formatting
+        run: |
+          find src include tests -name '*.c' -o -name '*.h' | \
+            xargs clang-format --dry-run --Werror --style=file
+
+      - name: Check third_party/wintun provenance
+        run: cd third_party/wintun && sha256sum -c SHA256SUMS
+
+  # ──────────────────────────────────────────
+  # Linux x86_64: Release build + tests
+  # ──────────────────────────────────────────
+  linux-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DWG_BUILD_TESTS=ON -DWG_ASAN=OFF
+          cmake --build build -j$(nproc)
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+      # What an embedder that compiles the sources itself does (see
+      # docs/embedding.md): the Linux lines of sources.txt, no CMake, then a
+      # test linked against them. With both feature macros embedders use.
+      - name: Build from sources.txt without CMake
+        run: |
+          srcs=$(awk '/^src\// && ($2 == "all" || $2 == "posix" || $2 == "linux") {print $1}' sources.txt)
+          for def in _POSIX_C_SOURCE=200112L _GNU_SOURCE; do
+            rm -rf plain && mkdir plain
+            for f in $srcs; do
+              cc -std=c17 -D$def -Iinclude -Isrc -c "$f" -o "plain/$(echo "$f" | tr / _).o"
+            done
+            cc -std=c17 -D$def -Iinclude -Isrc tests/test_uapi_set.c plain/*.o -lsodium -lpthread -o plain/test_uapi_set
+            ./plain/test_uapi_set > /dev/null
+            echo "$def: $(echo $srcs | wc -w) sources, test_uapi_set passed"
+          done
+
+  # ──────────────────────────────────────────
+  # Linux x86_64: Debug + ASan/UBSan
+  # ──────────────────────────────────────────
+  linux-x86_64-asan:
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev
+
+      - name: Build (Debug + sanitizers)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DWG_BUILD_TESTS=ON -DWG_ASAN=ON
+          cmake --build build -j$(nproc)
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+  # ──────────────────────────────────────────
+  # Linux x86_64: Debug + ASan, capped buffer pools
+  # (the iOS/Android memory profile; test_pool_exhaustion runs only here)
+  # ──────────────────────────────────────────
+  linux-x86_64-constrained:
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: detect_leaks=1
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev
+
+      - name: Build (Debug + sanitizers, WG_MEMORY_CONSTRAINED)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DWG_BUILD_TESTS=ON -DWG_ASAN=ON -DWG_MEMORY_CONSTRAINED=ON
+          cmake --build build -j$(nproc)
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+  # ──────────────────────────────────────────
+  # Linux x86_64: Debug + TSan
+  # ──────────────────────────────────────────
+  linux-x86_64-tsan:
+    runs-on: ubuntu-latest
+    env:
+      TSAN_OPTIONS: second_deadlock_stack=1 halt_on_error=1 suppressions=${{ github.workspace }}/.github/tsan.supp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev
+
+      - name: Build (Debug + TSan)
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Debug -DWG_BUILD_TESTS=ON -DWG_ASAN=OFF -DWG_TSAN=ON
+          cmake --build build -j$(nproc)
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+
+  # ──────────────────────────────────────────
+  # Linux aarch64: Release build + tests
+  # ──────────────────────────────────────────
+  linux-aarch64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsodium-dev
+
+      - name: Build
+        run: |
+          cmake -B build -DCMAKE_BUILD_TYPE=Release -DWG_BUILD_TESTS=ON -DWG_ASAN=OFF
+          cmake --build build -j$(nproc)
+
+      - name: Test
+        run: cd build && ctest --output-on-failure
+

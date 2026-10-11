@@ -1,0 +1,22 @@
+build/
+build-*/
+build-nix/
+build-tsan/
+cmake-build-*/
+.cache/
+.clangd/
+compile_commands.json
+*.o
+*.a
+*.so
+*.dylib
+.DS_Store
+perf.data
+perf.data.old
+perf_*.data
+perf_*.data.old
+Testing/
+refs/
+
+# Private keys (e.g. EC2 SSH keys) must never be committed
+*.pem

@@ -1,0 +1,8 @@
+private_key=0000000000000000000000000000000000000000000000000000000000000001
+listen_port=0
+public_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+endpoint=[::1]:51820
+allowed_ip=0.0.0.0/0
+allowed_ip=::/0
+public_key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+remove=true
