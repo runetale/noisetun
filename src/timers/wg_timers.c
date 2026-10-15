@@ -111,9 +111,12 @@ static int cond_timedwait_mono(pthread_cond_t *cond, pthread_mutex_t *lock,
  *
  * The thread starts with the first timer and is joined after the last,
  * under svc_life, so a new timer never races the old thread's exit.
+ *
+ * The locks are set up once, by pthread_once rather than static
+ * initialisers, which the Windows shim's CRITICAL_SECTION has none of.
  * ──────────────────────────────────────── */
 
-static pthread_mutex_t svc_life = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t svc_life;
 
 static struct {
     pthread_mutex_t lock;
@@ -128,14 +131,25 @@ static struct {
     bool stopping;
     uintptr_t gen; /* bumped per thread, so a detached old one bows out */
     pthread_t thread;
-} svc = {
-    .lock = PTHREAD_MUTEX_INITIALIZER,
-    .idle = PTHREAD_COND_INITIALIZER,
-};
+} svc;
+
+static pthread_once_t svc_once = PTHREAD_ONCE_INIT;
+
+static void svc_init_once(void)
+{
+    pthread_mutex_init(&svc_life, NULL);
+    pthread_mutex_init(&svc.lock, NULL);
+    pthread_cond_init(&svc.idle, NULL);
+}
+
+/* True on a timer thread: a callback stopping its own timer, or the last
+ * timer going from a callback, must not wait for the thread it is on. */
+static _Thread_local bool on_svc_thread;
 
 static void *svc_thread_fn(void *arg)
 {
     uintptr_t gen = (uintptr_t)arg;
+    on_svc_thread = true;
 #ifdef __linux__
     pthread_setname_np(pthread_self(), "wg-timers");
 #endif
@@ -223,7 +237,7 @@ static void svc_stop(void)
     pthread_cond_signal(&svc.cond);
     pthread_mutex_unlock(&svc.lock);
 
-    if (pthread_equal(pthread_self(), svc.thread))
+    if (on_svc_thread)
         pthread_detach(svc.thread); /* the last timer went from a callback */
     else
         pthread_join(svc.thread, NULL);
@@ -234,7 +248,7 @@ static void svc_stop(void)
  * callback stopping its own timer does not wait for itself. */
 static void svc_wait_not_firing(wg_timer_t *timer)
 {
-    while (svc.firing == timer && !pthread_equal(pthread_self(), svc.thread))
+    while (svc.firing == timer && !on_svc_thread)
         pthread_cond_wait(&svc.idle, &svc.lock);
 }
 
@@ -247,6 +261,7 @@ wg_timer_t *wg_timer_new(struct wg_peer *peer, wg_timer_fn callback)
     timer->peer = peer;
     timer->callback = callback;
 
+    pthread_once(&svc_once, svc_init_once);
     pthread_mutex_lock(&svc_life);
     if (svc.count == 0 && !svc_start()) {
         pthread_mutex_unlock(&svc_life);

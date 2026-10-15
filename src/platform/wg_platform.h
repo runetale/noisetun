@@ -207,6 +207,12 @@ static inline int pthread_join(pthread_t thread, void **retval)
     return 0;
 }
 
+static inline int pthread_detach(pthread_t thread)
+{
+    CloseHandle(thread);
+    return 0;
+}
+
 /* ────────────────────────────────────────
  * POSIX compatibility shims
  * ──────────────────────────────────────── */
@@ -319,6 +325,11 @@ static inline int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
         return (GetLastError() == ERROR_TIMEOUT) ? ETIMEDOUT : -1;
     return 0;
 }
+
+/* The condattr shim ignores the clock, and timed waits measure on the
+ * monotonic one (see pthread_cond_timedwait above), which is what a
+ * caller setting CLOCK_MONOTONIC wants: it works, in effect. */
+#define WG_CONDATTR_SETCLOCK_WORKS 1
 
 /* pthread_condattr (no-op on Windows, clock is always monotonic) */
 typedef int pthread_condattr_t;
