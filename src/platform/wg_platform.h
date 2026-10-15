@@ -356,6 +356,16 @@ static inline int pthread_condattr_setclock(pthread_condattr_t *a, int c)
 #include <stdlib.h>
 #include <unistd.h>
 
+/* Whether pthread_condattr_setclock(CLOCK_MONOTONIC) does what it says.
+ * ESP-IDF returns 0 from it and still measures every timed wait against
+ * gettimeofday(), so a caller must not take its word and should give
+ * deadlines on CLOCK_REALTIME there. */
+#ifdef ESP_PLATFORM
+#define WG_CONDATTR_SETCLOCK_WORKS 0
+#else
+#define WG_CONDATTR_SETCLOCK_WORKS 1
+#endif
+
 /* Frees memory from posix_memalign; the Windows shim needs _aligned_free. */
 static inline void wg_aligned_free(void *ptr)
 {

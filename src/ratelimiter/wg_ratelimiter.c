@@ -90,17 +90,22 @@ static bool ip_equal(const uint8_t *a, const uint8_t *b, uint8_t len)
  * ──────────────────────────────────────── */
 
 static int cond_timedwait_mono(pthread_cond_t *cond, pthread_mutex_t *mutex,
-                               int64_t timeout_ns)
+                               int cond_clock, int64_t timeout_ns)
 {
 #ifdef __APPLE__
+    (void)cond_clock;
     /* macOS: use relative timeout */
     struct timespec rel;
     rel.tv_sec = (time_t)(timeout_ns / 1000000000LL);
     rel.tv_nsec = (long)(timeout_ns % 1000000000LL);
     return pthread_cond_timedwait_relative_np(cond, mutex, &rel);
 #else
+    /* The default clock if setclock was refused or ignored (ESP-IDF,
+     * WG_CONDATTR_SETCLOCK_WORKS): a monotonic deadline on a realtime
+     * condvar is long past once the wall clock is set, and the GC thread
+     * would spin. */
     struct timespec abs;
-    clock_gettime(CLOCK_MONOTONIC, &abs);
+    clock_gettime(cond_clock, &abs);
     abs.tv_sec += (time_t)(timeout_ns / 1000000000LL);
     abs.tv_nsec += (long)(timeout_ns % 1000000000LL);
     if (abs.tv_nsec >= 1000000000L) {
@@ -167,8 +172,8 @@ static void *gc_thread_fn(void *arg)
         }
 
         /* Ticker active — wait 1 second then clean up. */
-        int rc =
-            cond_timedwait_mono(&rl->gc_cond, &rl->gc_mutex, WG_RATELIMIT_GC_INTERVAL_NS);
+        int rc = cond_timedwait_mono(&rl->gc_cond, &rl->gc_mutex, rl->gc_clock,
+                                     WG_RATELIMIT_GC_INTERVAL_NS);
         if (!rl->gc_running)
             break;
 
@@ -221,16 +226,20 @@ wg_error_t wg_ratelimiter_init(wg_ratelimiter_t *rl)
     {
         pthread_condattr_t attr;
         pthread_condattr_init(&attr);
-        if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+        if (!WG_CONDATTR_SETCLOCK_WORKS ||
+            pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
             /* Fallback to default clock if CLOCK_MONOTONIC unsupported. */
             pthread_cond_init(&rl->gc_cond, NULL);
+            rl->gc_clock = CLOCK_REALTIME;
         } else {
             pthread_cond_init(&rl->gc_cond, &attr);
+            rl->gc_clock = CLOCK_MONOTONIC;
         }
         pthread_condattr_destroy(&attr);
     }
 #else
     pthread_cond_init(&rl->gc_cond, NULL);
+    rl->gc_clock = CLOCK_MONOTONIC; /* the Windows shim measures on it */
 #endif
 
     rl->gc_running = true;

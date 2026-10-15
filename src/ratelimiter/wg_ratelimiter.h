@@ -47,7 +47,9 @@ typedef struct wg_ratelimiter_entry {
 /* ────────────────────────────────────────
  * Rate limiter table (chained hash map)
  * ──────────────────────────────────────── */
-#define WG_RATELIMIT_TABLE_SIZE 4096
+#ifndef WG_RATELIMIT_TABLE_SIZE
+#define WG_RATELIMIT_TABLE_SIZE 4096 /* a build for a small device can set fewer */
+#endif
 
 typedef struct {
     wg_ratelimiter_entry_t *buckets[WG_RATELIMIT_TABLE_SIZE];
@@ -58,6 +60,8 @@ typedef struct {
     pthread_t gc_thread;
     pthread_mutex_t gc_mutex;
     pthread_cond_t gc_cond;
+    int gc_clock;     /* clock gc_cond's timed waits count on: CLOCK_MONOTONIC
+                         unless pthread_condattr_setclock refused it */
     bool gc_running;  /* true while GC thread should run */
     bool gc_active;   /* true when table is non-empty (ticker active) */
     bool initialized; /* set to true after first successful init */

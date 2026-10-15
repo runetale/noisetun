@@ -552,11 +552,15 @@ void wg_send_keepalive(struct wg_peer *peer)
         return;
     }
 
-    /* Get an empty outbound element from pool (packet_len=0 = keepalive) */
+    /* Get an empty outbound element from pool (packet_len=0 = keepalive).
+     * With one thread for every timer, waiting here for a buffer would
+     * hold up the timers of every peer, including the ones whose staged
+     * packets hold the buffers; skip the keepalive instead. */
     wg_device_t *dev = peer->device;
     wg_outbound_elem_t *elem;
     if (dev->pool.outbound) {
-        elem = wg_wait_pool_get(dev->pool.outbound);
+        elem = WG_TIMERS_SHARED_THREAD ? wg_wait_pool_try_get(dev->pool.outbound)
+                                       : wg_wait_pool_get(dev->pool.outbound);
         if (elem)
             elem->pool = dev->pool.outbound;
     } else {
