@@ -141,6 +141,12 @@ void wg_wait_pool_destroy(wg_wait_pool_t *p);
 void *wg_wait_pool_get(wg_wait_pool_t *p);
 
 /*
+ * Like wg_wait_pool_get, but returns NULL instead of blocking when max
+ * objects are out.
+ */
+void *wg_wait_pool_try_get(wg_wait_pool_t *p);
+
+/*
  * Return an object to the pool.
  *
  * If reset_fn is set, it is called before the object is pooled.
@@ -154,5 +160,17 @@ void wg_wait_pool_put(wg_wait_pool_t *p, void *obj);
  * Returns the number of objects successfully returned.
  */
 int wg_wait_pool_put_batch(wg_wait_pool_t *p, void **objs, int count);
+
+/*
+ * The batch a worker that holds batch objects at once may use: at most a
+ * quarter of a capped pool, so the rest stays for staged packets and
+ * packets in flight. A batch above the cap would wait forever for itself.
+ */
+static inline int wg_wait_pool_batch_limit(const wg_wait_pool_t *p, int batch)
+{
+    if (!p || p->max == 0 || batch <= (int)(p->max / 4))
+        return batch;
+    return p->max >= 4 ? (int)(p->max / 4) : 1;
+}
 
 #endif /* WG_POOLS_H */

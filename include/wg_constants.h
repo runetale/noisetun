@@ -89,16 +89,28 @@
 
 /* --- Queue sizes ---
  * MPMC encryption/decryption queues carry individual elements.
- * SPSC per-peer queues carry containers (1024, ~34 elems each). */
+ * SPSC per-peer queues carry containers (1024, ~34 elems each).
+ * A build for a microcontroller sets these smaller; keep
+ * WG_POOL_MAX_ELEMENTS above WG_QUEUE_STAGED_SIZE times the peers that
+ * can be waiting on a handshake at once, since staged packets hold their
+ * buffers until the handshake completes or the keys are zeroed. */
+#ifndef WG_QUEUE_OUTBOUND_SIZE
 #if WG_MEMORY_CONSTRAINED || defined(__ANDROID__)
 #define WG_QUEUE_OUTBOUND_SIZE 1024
-#define WG_QUEUE_INBOUND_SIZE  1024
 #else
 #define WG_QUEUE_OUTBOUND_SIZE 4096
-#define WG_QUEUE_INBOUND_SIZE  4096
+#endif
+#endif
+#ifndef WG_QUEUE_INBOUND_SIZE
+#if WG_MEMORY_CONSTRAINED || defined(__ANDROID__)
+#define WG_QUEUE_INBOUND_SIZE 1024
+#else
+#define WG_QUEUE_INBOUND_SIZE 4096
+#endif
 #endif
 
 /* Packet buffers per direction; 0 = allocated as needed, never capped. */
+#ifndef WG_POOL_MAX_ELEMENTS
 #if WG_MEMORY_CONSTRAINED
 #define WG_POOL_MAX_ELEMENTS 1024
 #elif defined(__ANDROID__)
@@ -106,10 +118,23 @@
 #else
 #define WG_POOL_MAX_ELEMENTS 0
 #endif
+#endif
 #define WG_QUEUE_CONTAINER_SIZE 1024 /* SPSC per-peer container queues */
+#ifndef WG_QUEUE_HANDSHAKE_SIZE
 #define WG_QUEUE_HANDSHAKE_SIZE 128
-#define WG_MAX_QUEUED_PACKETS   128
-#define WG_QUEUE_STAGED_SIZE    128
+#endif
+#define WG_MAX_QUEUED_PACKETS 128
+#ifndef WG_QUEUE_STAGED_SIZE
+#define WG_QUEUE_STAGED_SIZE 128
+#endif
+
+/* --- Timer threads ---
+ * Each peer timer gets its own thread unless this is 1, in which case one
+ * thread runs every timer in the process (wg_timers.c). Five threads per
+ * peer do not fit in a microcontroller's RAM. */
+#ifndef WG_TIMERS_SHARED_THREAD
+#define WG_TIMERS_SHARED_THREAD 0
+#endif
 
 /* --- Peer limits --- */
 #define WG_MAX_PEERS_PER_DEVICE (1U << 20)
@@ -120,7 +145,11 @@
 
 /* --- Packet sizes --- */
 #define WG_MIN_MESSAGE_SIZE 4
-#if defined(__APPLE__) && TARGET_OS_IPHONE
+/* A build for a small device can set it to one packet as iOS does: a
+ * buffer is allocated at this size whether or not GSO/GRO fills it. */
+#ifdef WG_MAX_SEGMENT_SIZE
+/* set by the build */
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
 #define WG_MAX_SEGMENT_SIZE 1700 /* one packet: no GSO/GRO on iOS */
 #else
 #define WG_MAX_SEGMENT_SIZE 65535

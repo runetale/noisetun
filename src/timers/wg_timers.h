@@ -15,7 +15,8 @@
  * handshake initiations, keepalive sends, or key material zeroing.
  *
  * Implementation uses per-timer threads with condition variables
- * for sleeping, modification, and cancellation.
+ * for sleeping, modification, and cancellation, or, with
+ * WG_TIMERS_SHARED_THREAD, one thread for every timer in the process.
  *
  * Reference: wireguard-go/device/timers.go
  */
@@ -44,20 +45,28 @@ typedef struct wg_timer {
     wg_timer_fn callback;
 
     /* Timing state */
-    uint64_t deadline_ns;      /* absolute monotonic deadline (0 = not set) */
+    uint64_t deadline_ns; /* absolute monotonic deadline (0 = not set) */
+    bool is_pending;      /* timer is armed */
+
+#if WG_TIMERS_SHARED_THREAD
+    /* The shared thread's lock guards the fields above. */
+    struct wg_timer *next; /* every live timer, for the shared thread to scan */
+#else
     uint64_t wait_deadline_ns; /* what the thread sleeps until: UINT64_MAX
                                   untimed, 0 not sleeping */
-    bool is_pending;           /* timer is armed */
     bool should_stop;          /* signal the thread to exit */
 
     /* Synchronisation */
     pthread_mutex_t lock;
     pthread_cond_t cond;      /* signalled on mod/del/stop */
+    int cond_clock;           /* clock cond's timed waits count on: CLOCK_MONOTONIC
+                                 unless pthread_condattr_setclock refused it */
     pthread_mutex_t run_lock; /* held while callback runs (for DelSync) */
 
     /* Timer thread */
     pthread_t thread;
     bool thread_started;
+#endif
 } wg_timer_t;
 
 /* ────────────────────────────────────────

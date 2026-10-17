@@ -53,10 +53,11 @@ static uint64_t mono_now_ns(void)
  * Returns ETIMEDOUT if the deadline elapsed, 0 otherwise.
  */
 static int cond_timedwait_mono(pthread_cond_t *cond, pthread_mutex_t *lock,
-                               uint64_t deadline_ns)
+                               int cond_clock, uint64_t deadline_ns)
 {
 #ifdef __APPLE__
     /* macOS: compute relative timeout from monotonic clock */
+    (void)cond_clock;
     uint64_t now = mono_now_ns();
     if (now >= deadline_ns) {
         /* Already past deadline — poll once and return timeout */
@@ -72,11 +73,292 @@ static int cond_timedwait_mono(pthread_cond_t *cond, pthread_mutex_t *lock,
 #else
     /* Linux / POSIX: condvar is configured for CLOCK_MONOTONIC */
     struct timespec ts;
-    ts.tv_sec = (time_t)(deadline_ns / 1000000000ULL);
-    ts.tv_nsec = (long)(deadline_ns % 1000000000ULL);
+    if (cond_clock == CLOCK_MONOTONIC) {
+        ts.tv_sec = (time_t)(deadline_ns / 1000000000ULL);
+        ts.tv_nsec = (long)(deadline_ns % 1000000000ULL);
+        return pthread_cond_timedwait(cond, lock, &ts);
+    }
+    /* The condvar kept the default clock (setclock refused, or ignored
+     * as on ESP-IDF: WG_CONDATTR_SETCLOCK_WORKS).
+     * A monotonic deadline read as a realtime one lies decades in the
+     * past once the wall clock is set, and the thread would spin. Turn
+     * what remains into a deadline on the condvar's own clock.
+     * ESP-IDF turns that deadline back into ticks when the wait starts
+     * (pthread_cond_var.c), so a wall clock step during the wait neither
+     * stretches nor shortens it; a step back would stretch a wait only
+     * where the kernel waits on the realtime deadline itself. */
+    uint64_t now = mono_now_ns();
+    uint64_t remain = deadline_ns > now ? deadline_ns - now : 0;
+    clock_gettime(cond_clock, &ts);
+    uint64_t abs_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec + remain;
+    ts.tv_sec = (time_t)(abs_ns / 1000000000ULL);
+    ts.tv_nsec = (long)(abs_ns % 1000000000ULL);
     return pthread_cond_timedwait(cond, lock, &ts);
 #endif
 }
+
+#if WG_TIMERS_SHARED_THREAD
+
+/* ────────────────────────────────────────
+ * Shared timer thread
+ *
+ * One thread runs every timer in the process: it sleeps until the
+ * earliest armed deadline, then runs that timer's callback with no lock
+ * held. svc.lock guards the timer list and each timer's deadline_ns and
+ * is_pending, and is never held while taking another lock, so mod and
+ * del can be called with any lock held, as with per-timer threads.
+ *
+ * DelSync and destroy wait while the timer's callback is running
+ * (svc.firing), the job run_lock does for a per-timer thread. Callbacks
+ * run one after another, so a callback must not wait on anything another
+ * timer's callback would have to do first.
+ *
+ * The thread starts with the first timer and is joined after the last,
+ * under svc_life, so a new timer never races the old thread's exit.
+ *
+ * The locks are set up once, by pthread_once rather than static
+ * initialisers, which the Windows shim's CRITICAL_SECTION has none of.
+ * ──────────────────────────────────────── */
+
+static pthread_mutex_t svc_life;
+
+static struct {
+    pthread_mutex_t lock;
+    pthread_cond_t cond; /* wakes the thread: earlier deadline, stop */
+    pthread_cond_t idle; /* a callback returned */
+    int cond_clock;      /* clock cond's timed waits count on */
+    wg_timer_t *timers;  /* every live timer */
+    size_t count;
+    wg_timer_t *firing;        /* timer whose callback is running */
+    uint64_t wait_deadline_ns; /* what the thread sleeps until: UINT64_MAX
+                                  untimed, 0 not sleeping */
+    bool stopping;
+    uintptr_t gen; /* bumped per thread, so a detached old one bows out */
+    pthread_t thread;
+} svc;
+
+static pthread_once_t svc_once = PTHREAD_ONCE_INIT;
+
+static void svc_init_once(void)
+{
+    pthread_mutex_init(&svc_life, NULL);
+    pthread_mutex_init(&svc.lock, NULL);
+    pthread_cond_init(&svc.idle, NULL);
+}
+
+/* True on a timer thread: a callback stopping its own timer, or the last
+ * timer going from a callback, must not wait for the thread it is on. */
+static _Thread_local bool on_svc_thread;
+
+static void *svc_thread_fn(void *arg)
+{
+    uintptr_t gen = (uintptr_t)arg;
+    on_svc_thread = true;
+#ifdef __linux__
+    pthread_setname_np(pthread_self(), "wg-timers");
+#endif
+
+    pthread_mutex_lock(&svc.lock);
+    while (!svc.stopping && svc.gen == gen) {
+        uint64_t now = mono_now_ns();
+        uint64_t next = UINT64_MAX;
+        wg_timer_t *due = NULL;
+        for (wg_timer_t *t = svc.timers; t; t = t->next) {
+            if (!t->is_pending)
+                continue;
+            if (t->deadline_ns <= now) {
+                due = t;
+                break;
+            }
+            if (t->deadline_ns < next)
+                next = t->deadline_ns;
+        }
+
+        if (!due) {
+            svc.wait_deadline_ns = next;
+            if (next == UINT64_MAX)
+                pthread_cond_wait(&svc.cond, &svc.lock);
+            else
+                cond_timedwait_mono(&svc.cond, &svc.lock, svc.cond_clock, next);
+            svc.wait_deadline_ns = 0;
+            continue;
+        }
+
+        due->is_pending = false;
+        svc.firing = due;
+        pthread_mutex_unlock(&svc.lock);
+
+        if (due->callback)
+            due->callback(due->peer);
+
+        pthread_mutex_lock(&svc.lock);
+        if (svc.firing == due)
+            svc.firing = NULL;
+        pthread_cond_broadcast(&svc.idle);
+    }
+    pthread_mutex_unlock(&svc.lock);
+
+    return NULL;
+}
+
+/* Called under svc_life with no timers. */
+static bool svc_start(void)
+{
+#ifdef __APPLE__
+    /* cond_timedwait_mono waits relative to the monotonic clock. */
+    pthread_cond_init(&svc.cond, NULL);
+    svc.cond_clock = CLOCK_REALTIME;
+#else
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    if (!WG_CONDATTR_SETCLOCK_WORKS ||
+        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+        pthread_cond_init(&svc.cond, NULL);
+        svc.cond_clock = CLOCK_REALTIME;
+    } else {
+        pthread_cond_init(&svc.cond, &attr);
+        svc.cond_clock = CLOCK_MONOTONIC;
+    }
+    pthread_condattr_destroy(&attr);
+#endif
+
+    pthread_mutex_lock(&svc.lock);
+    svc.stopping = false;
+    uintptr_t gen = ++svc.gen;
+    pthread_mutex_unlock(&svc.lock);
+    if (pthread_create(&svc.thread, NULL, svc_thread_fn, (void *)gen) != 0) {
+        pthread_cond_destroy(&svc.cond);
+        return false;
+    }
+    return true;
+}
+
+/* Called under svc_life once the last timer is gone. */
+static void svc_stop(void)
+{
+    pthread_mutex_lock(&svc.lock);
+    svc.stopping = true;
+    pthread_cond_signal(&svc.cond);
+    pthread_mutex_unlock(&svc.lock);
+
+    if (on_svc_thread)
+        pthread_detach(svc.thread); /* the last timer went from a callback */
+    else
+        pthread_join(svc.thread, NULL);
+    pthread_cond_destroy(&svc.cond);
+}
+
+/* Waits, under svc.lock, until timer's callback is not running. A
+ * callback stopping its own timer does not wait for itself. */
+static void svc_wait_not_firing(wg_timer_t *timer)
+{
+    while (svc.firing == timer && !on_svc_thread)
+        pthread_cond_wait(&svc.idle, &svc.lock);
+}
+
+wg_timer_t *wg_timer_new(struct wg_peer *peer, wg_timer_fn callback)
+{
+    wg_timer_t *timer = calloc(1, sizeof(*timer));
+    if (!timer)
+        return NULL;
+
+    timer->peer = peer;
+    timer->callback = callback;
+
+    pthread_once(&svc_once, svc_init_once);
+    pthread_mutex_lock(&svc_life);
+    if (svc.count == 0 && !svc_start()) {
+        pthread_mutex_unlock(&svc_life);
+        free(timer);
+        return NULL;
+    }
+    pthread_mutex_lock(&svc.lock);
+    timer->next = svc.timers;
+    svc.timers = timer;
+    svc.count++;
+    pthread_mutex_unlock(&svc.lock);
+    pthread_mutex_unlock(&svc_life);
+
+    return timer;
+}
+
+void wg_timer_mod(wg_timer_t *timer, uint64_t duration_ns)
+{
+    if (!timer)
+        return;
+
+    uint64_t now = mono_now_ns();
+
+    pthread_mutex_lock(&svc.lock);
+    timer->is_pending = true;
+    timer->deadline_ns = now + duration_ns;
+    /* A later deadline is picked up when the thread wakes for the one it
+     * sleeps to, and a thread that is not sleeping rescans anyway. */
+    if (timer->deadline_ns < svc.wait_deadline_ns)
+        pthread_cond_signal(&svc.cond);
+    pthread_mutex_unlock(&svc.lock);
+}
+
+void wg_timer_del(wg_timer_t *timer)
+{
+    if (!timer)
+        return;
+
+    /* No wake: the thread finds nothing due at its old deadline. */
+    pthread_mutex_lock(&svc.lock);
+    timer->is_pending = false;
+    pthread_mutex_unlock(&svc.lock);
+}
+
+void wg_timer_del_sync(wg_timer_t *timer)
+{
+    if (!timer)
+        return;
+
+    pthread_mutex_lock(&svc.lock);
+    timer->is_pending = false;
+    svc_wait_not_firing(timer);
+    /* The callback may have re-armed it. */
+    timer->is_pending = false;
+    pthread_mutex_unlock(&svc.lock);
+}
+
+bool wg_timer_is_pending(wg_timer_t *timer)
+{
+    if (!timer)
+        return false;
+
+    pthread_mutex_lock(&svc.lock);
+    bool pending = timer->is_pending;
+    pthread_mutex_unlock(&svc.lock);
+    return pending;
+}
+
+void wg_timer_destroy(wg_timer_t *timer)
+{
+    if (!timer)
+        return;
+
+    pthread_mutex_lock(&svc_life);
+    pthread_mutex_lock(&svc.lock);
+    for (wg_timer_t **pp = &svc.timers; *pp; pp = &(*pp)->next) {
+        if (*pp == timer) {
+            *pp = timer->next;
+            break;
+        }
+    }
+    svc.count--;
+    svc_wait_not_firing(timer);
+    size_t left = svc.count;
+    pthread_mutex_unlock(&svc.lock);
+    if (left == 0)
+        svc_stop();
+    pthread_mutex_unlock(&svc_life);
+
+    free(timer);
+}
+
+#else /* !WG_TIMERS_SHARED_THREAD */
 
 /* ────────────────────────────────────────
  * Timer thread
@@ -102,7 +384,8 @@ static void *timer_thread_fn(void *arg)
          * check the clock against the current one. */
         if (mono_now_ns() < timer->deadline_ns) {
             timer->wait_deadline_ns = timer->deadline_ns;
-            cond_timedwait_mono(&timer->cond, &timer->lock, timer->deadline_ns);
+            cond_timedwait_mono(&timer->cond, &timer->lock, timer->cond_clock,
+                                timer->deadline_ns);
             continue;
         }
 
@@ -154,16 +437,20 @@ wg_timer_t *wg_timer_new(struct wg_peer *peer, wg_timer_fn callback)
     /* macOS: no pthread_condattr_setclock; use default (REALTIME).
      * cond_timedwait_mono() uses pthread_cond_timedwait_relative_np. */
     pthread_cond_init(&timer->cond, NULL);
+    timer->cond_clock = CLOCK_REALTIME;
 #else
     /* Linux / POSIX: set CLOCK_MONOTONIC so pthread_cond_timedwait
      * accepts monotonic absolute times directly. */
     {
         pthread_condattr_t attr;
         pthread_condattr_init(&attr);
-        if (pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+        if (!WG_CONDATTR_SETCLOCK_WORKS ||
+            pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
             pthread_cond_init(&timer->cond, NULL);
+            timer->cond_clock = CLOCK_REALTIME;
         } else {
             pthread_cond_init(&timer->cond, &attr);
+            timer->cond_clock = CLOCK_MONOTONIC;
         }
         pthread_condattr_destroy(&attr);
     }
@@ -268,6 +555,8 @@ void wg_timer_destroy(wg_timer_t *timer)
 
     free(timer);
 }
+
+#endif /* WG_TIMERS_SHARED_THREAD */
 
 /* ────────────────────────────────────────
  * Helper: check if peer timers should fire

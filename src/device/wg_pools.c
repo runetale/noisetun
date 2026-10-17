@@ -221,7 +221,7 @@ static int lf_pool_put_batch(wg_wait_pool_t *p, void **objs, int count)
  * Mutex-based operations (original, used when max > 0 or lf not enabled)
  * ──────────────────────────────────────── */
 
-void *wg_wait_pool_get(wg_wait_pool_t *p)
+static void *pool_get(wg_wait_pool_t *p, bool wait)
 {
     /* Lock-free fast path */
     if (p->lf_enabled)
@@ -231,7 +231,7 @@ void *wg_wait_pool_get(wg_wait_pool_t *p)
 
     /* Backpressure: wait if at max outstanding, unless shutting down. */
     if (p->max != 0) {
-        while (p->out >= p->max && !p->closed)
+        while (wait && p->out >= p->max && !p->closed)
             pthread_cond_wait(&p->cond, &p->lock);
         if (p->out >= p->max) {
             pthread_mutex_unlock(&p->lock);
@@ -267,6 +267,16 @@ void *wg_wait_pool_get(wg_wait_pool_t *p)
     }
 
     return obj;
+}
+
+void *wg_wait_pool_get(wg_wait_pool_t *p)
+{
+    return pool_get(p, true);
+}
+
+void *wg_wait_pool_try_get(wg_wait_pool_t *p)
+{
+    return pool_get(p, false);
 }
 
 void wg_wait_pool_put(wg_wait_pool_t *p, void *obj)

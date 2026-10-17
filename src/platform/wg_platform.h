@@ -207,6 +207,12 @@ static inline int pthread_join(pthread_t thread, void **retval)
     return 0;
 }
 
+static inline int pthread_detach(pthread_t thread)
+{
+    CloseHandle(thread);
+    return 0;
+}
+
 /* ────────────────────────────────────────
  * POSIX compatibility shims
  * ──────────────────────────────────────── */
@@ -320,6 +326,11 @@ static inline int pthread_cond_timedwait(pthread_cond_t *c, pthread_mutex_t *m,
     return 0;
 }
 
+/* The condattr shim ignores the clock, and timed waits measure on the
+ * monotonic one (see pthread_cond_timedwait above), which is what a
+ * caller setting CLOCK_MONOTONIC wants: it works, in effect. */
+#define WG_CONDATTR_SETCLOCK_WORKS 1
+
 /* pthread_condattr (no-op on Windows, clock is always monotonic) */
 typedef int pthread_condattr_t;
 static inline int pthread_condattr_init(pthread_condattr_t *a)
@@ -355,6 +366,16 @@ static inline int pthread_condattr_setclock(pthread_condattr_t *a, int c)
 #include <arpa/inet.h>
 #include <stdlib.h>
 #include <unistd.h>
+
+/* Whether pthread_condattr_setclock(CLOCK_MONOTONIC) does what it says.
+ * ESP-IDF returns 0 from it and still measures every timed wait against
+ * gettimeofday(), so a caller must not take its word and should give
+ * deadlines on CLOCK_REALTIME there. */
+#ifdef ESP_PLATFORM
+#define WG_CONDATTR_SETCLOCK_WORKS 0
+#else
+#define WG_CONDATTR_SETCLOCK_WORKS 1
+#endif
 
 /* Frees memory from posix_memalign; the Windows shim needs _aligned_free. */
 static inline void wg_aligned_free(void *ptr)

@@ -920,6 +920,7 @@ void *wg_worker_udp_recv(void *arg)
         batch_size = 1;
     if (batch_size > WG_UDP_RECV_BATCH_MAX)
         batch_size = WG_UDP_RECV_BATCH_MAX;
+    batch_size = wg_wait_pool_batch_limit(dev->pool.inbound, batch_size);
 
     /* Pre-allocate inbound elements — recvmmsg writes directly into
      * element buffers, avoiding a memcpy per packet. */

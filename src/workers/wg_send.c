@@ -481,6 +481,7 @@ void *wg_worker_tun_read(void *arg)
         batch_size = 1;
     if (batch_size > 128)
         batch_size = 128;
+    batch_size = wg_wait_pool_batch_limit(dev->pool.outbound, batch_size);
 
     wg_outbound_elem_t **elems = calloc((size_t)batch_size, sizeof(*elems));
     uint8_t **bufs = calloc((size_t)batch_size, sizeof(*bufs));
