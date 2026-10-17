@@ -82,7 +82,11 @@ static int cond_timedwait_mono(pthread_cond_t *cond, pthread_mutex_t *lock,
      * as on ESP-IDF: WG_CONDATTR_SETCLOCK_WORKS).
      * A monotonic deadline read as a realtime one lies decades in the
      * past once the wall clock is set, and the thread would spin. Turn
-     * what remains into a deadline on the condvar's own clock. */
+     * what remains into a deadline on the condvar's own clock.
+     * ESP-IDF turns that deadline back into ticks when the wait starts
+     * (pthread_cond_var.c), so a wall clock step during the wait neither
+     * stretches nor shortens it; a step back would stretch a wait only
+     * where the kernel waits on the realtime deadline itself. */
     uint64_t now = mono_now_ns();
     uint64_t remain = deadline_ns > now ? deadline_ns - now : 0;
     clock_gettime(cond_clock, &ts);
