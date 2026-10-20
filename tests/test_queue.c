@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ────────────────────────────────────────
  * Helpers
@@ -28,6 +29,13 @@
     do {                  \
         printf("PASS\n"); \
     } while (0)
+
+static uint64_t test_mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000ULL + (uint64_t)ts.tv_nsec / 1000000ULL;
+}
 
 /* ────────────────────────────────────────
  * Test: basic push/pop
@@ -284,6 +292,61 @@ static void test_flush(void)
  * Main
  * ──────────────────────────────────────── */
 
+/* ────────────────────────────────────────
+ * Test: a timed pop that nothing answers comes back when it said
+ *
+ * Its deadline was on CLOCK_REALTIME, and the Windows shim measures
+ * against the monotonic clock: the deadline lay decades ahead there, and
+ * this waited for good.
+ * ──────────────────────────────────────── */
+
+typedef struct {
+    wg_queue_t *q;
+    void *item;
+} late_push_arg_t;
+
+static void *late_push_thread(void *arg)
+{
+    late_push_arg_t *a = arg;
+    struct timespec ts = {0, 20000000}; /* 20ms */
+    nanosleep(&ts, NULL);
+    wg_queue_push(a->q, a->item);
+    return NULL;
+}
+
+static void test_pop_timeout(void)
+{
+    TEST("timed pop times out, and takes a late push");
+
+    wg_queue_t q;
+    ASSERT_OK(wg_queue_init(&q, 4));
+    void *out = &q;
+
+    uint64_t start = test_mono_ms();
+    ASSERT_ERR(wg_queue_pop_timeout(&q, &out, 50), WG_ERR_TIMEOUT);
+    uint64_t took = test_mono_ms() - start;
+    assert(out == NULL);
+    /* Not early, and not much late either. */
+    assert(took >= 45);
+    assert(took < 2000);
+
+    /* Nothing to wait for: back at once. */
+    start = test_mono_ms();
+    ASSERT_ERR(wg_queue_pop_timeout(&q, &out, 0), WG_ERR_TIMEOUT);
+    assert(test_mono_ms() - start < 1000);
+
+    int item = 7;
+    late_push_arg_t la = {.q = &q, .item = &item};
+    pthread_t t;
+    pthread_create(&t, NULL, late_push_thread, &la);
+    ASSERT_OK(wg_queue_pop_timeout(&q, &out, 5000));
+    assert(out == &item);
+    pthread_join(t, NULL);
+
+    wg_queue_destroy(&q);
+    PASS();
+}
+
 int main(void)
 {
     printf("=== test_queue ===\n");
@@ -296,6 +359,7 @@ int main(void)
     test_wraparound();
     test_concurrent_producer_consumer();
     test_flush();
+    test_pop_timeout();
 
     printf("All queue tests passed.\n");
     return 0;

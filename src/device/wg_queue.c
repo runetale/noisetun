@@ -15,6 +15,75 @@
 #include <time.h>
 
 /* ────────────────────────────────────────
+ * Timed waits on the monotonic clock
+ *
+ * The same arrangement as the timers (wg_timers.c): the deadline is
+ * monotonic, and each platform is asked in the way it understands.
+ * A deadline on CLOCK_REALTIME measured against the Windows shim's
+ * monotonic clock lay decades ahead, and a pop that nothing answered
+ * never came back.
+ * ──────────────────────────────────────── */
+
+static uint64_t queue_mono_now_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+static int queue_cond_init_mono(pthread_cond_t *cond, int *cond_clock)
+{
+#ifdef __APPLE__
+    /* No pthread_condattr_setclock: queue_timedwait waits relative to
+     * the monotonic clock instead. */
+    *cond_clock = CLOCK_REALTIME;
+    return pthread_cond_init(cond, NULL);
+#else
+    pthread_condattr_t attr;
+    pthread_condattr_init(&attr);
+    int rc;
+    if (!WG_CONDATTR_SETCLOCK_WORKS || pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+        *cond_clock = CLOCK_REALTIME;
+        rc = pthread_cond_init(cond, NULL);
+    } else {
+        *cond_clock = CLOCK_MONOTONIC;
+        rc = pthread_cond_init(cond, &attr);
+    }
+    pthread_condattr_destroy(&attr);
+    return rc;
+#endif
+}
+
+static int queue_timedwait(pthread_cond_t *cond, pthread_mutex_t *lock, int cond_clock,
+                           uint64_t deadline_ns)
+{
+    uint64_t now = queue_mono_now_ns();
+    uint64_t remain = deadline_ns > now ? deadline_ns - now : 0;
+#ifdef __APPLE__
+    (void)cond_clock;
+    struct timespec rel;
+    rel.tv_sec = (time_t)(remain / 1000000000ULL);
+    rel.tv_nsec = (long)(remain % 1000000000ULL);
+    return pthread_cond_timedwait_relative_np(cond, lock, &rel);
+#else
+    struct timespec ts;
+    uint64_t abs_ns;
+    if (cond_clock == CLOCK_MONOTONIC) {
+        abs_ns = deadline_ns;
+    } else {
+        /* The condvar kept the default clock: what remains, as a
+         * deadline on that clock (see cond_timedwait_mono in
+         * wg_timers.c). */
+        clock_gettime(cond_clock, &ts);
+        abs_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec + remain;
+    }
+    ts.tv_sec = (time_t)(abs_ns / 1000000000ULL);
+    ts.tv_nsec = (long)(abs_ns % 1000000000ULL);
+    return pthread_cond_timedwait(cond, lock, &ts);
+#endif
+}
+
+/* ────────────────────────────────────────
  * Lifecycle
  * ──────────────────────────────────────── */
 
@@ -36,7 +105,7 @@ wg_error_t wg_queue_init(wg_queue_t *q, size_t capacity)
 
     if (pthread_mutex_init(&q->lock, NULL) != 0)
         goto fail_items;
-    if (pthread_cond_init(&q->not_empty, NULL) != 0)
+    if (queue_cond_init_mono(&q->not_empty, &q->not_empty_clock) != 0)
         goto fail_mutex;
     if (pthread_cond_init(&q->not_full, NULL) != 0)
         goto fail_not_empty;
@@ -172,20 +241,15 @@ wg_error_t wg_queue_try_pop(wg_queue_t *q, void **out)
 
 wg_error_t wg_queue_pop_timeout(wg_queue_t *q, void **out, int timeout_ms)
 {
-    struct timespec deadline;
-    clock_gettime(CLOCK_REALTIME, &deadline);
-    deadline.tv_sec += timeout_ms / 1000;
-    deadline.tv_nsec += (long)(timeout_ms % 1000) * 1000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec++;
-        deadline.tv_nsec -= 1000000000L;
-    }
+    if (timeout_ms < 0)
+        timeout_ms = 0;
+    uint64_t deadline_ns = queue_mono_now_ns() + (uint64_t)timeout_ms * 1000000ULL;
 
     pthread_mutex_lock(&q->lock);
 
     while (q->count == 0 && !q->closed) {
         q->pop_waiters++;
-        int rc = pthread_cond_timedwait(&q->not_empty, &q->lock, &deadline);
+        int rc = queue_timedwait(&q->not_empty, &q->lock, q->not_empty_clock, deadline_ns);
         q->pop_waiters--;
         if (rc == ETIMEDOUT || rc == EINVAL) {
             *out = NULL;

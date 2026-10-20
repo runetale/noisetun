@@ -55,6 +55,9 @@ typedef struct {
     pthread_mutex_t lock;
     pthread_cond_t not_empty; /* signalled on push or close */
     pthread_cond_t not_full;  /* signalled on pop or close */
+    /* The clock not_empty's timed waits measure against: CLOCK_MONOTONIC
+     * where the condvar could be set to it, CLOCK_REALTIME otherwise. */
+    int not_empty_clock;
 } wg_queue_t;
 
 /* ────────────────────────────────────────
