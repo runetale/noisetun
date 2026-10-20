@@ -42,7 +42,8 @@ static int queue_cond_init_mono(pthread_cond_t *cond, int *cond_clock)
     pthread_condattr_t attr;
     pthread_condattr_init(&attr);
     int rc;
-    if (!WG_CONDATTR_SETCLOCK_WORKS || pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
+    if (!WG_CONDATTR_SETCLOCK_WORKS ||
+        pthread_condattr_setclock(&attr, CLOCK_MONOTONIC) != 0) {
         *cond_clock = CLOCK_REALTIME;
         rc = pthread_cond_init(cond, NULL);
     } else {
@@ -249,7 +250,8 @@ wg_error_t wg_queue_pop_timeout(wg_queue_t *q, void **out, int timeout_ms)
 
     while (q->count == 0 && !q->closed) {
         q->pop_waiters++;
-        int rc = queue_timedwait(&q->not_empty, &q->lock, q->not_empty_clock, deadline_ns);
+        int rc =
+            queue_timedwait(&q->not_empty, &q->lock, q->not_empty_clock, deadline_ns);
         q->pop_waiters--;
         if (rc == ETIMEDOUT || rc == EINVAL) {
             *out = NULL;
