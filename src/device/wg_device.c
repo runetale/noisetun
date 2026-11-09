@@ -1430,6 +1430,27 @@ const char *wg_version(void)
     return WG_VERSION;
 }
 
+wg_error_t wg_device_set_packet_hooks(wg_device_t *dev, const wg_packet_hooks_t *hooks)
+{
+    if (!dev)
+        return WG_ERR_INVALID_ARGUMENT;
+
+    /* The workers read the hooks without a lock, which is safe only while
+     * none is running. */
+    pthread_mutex_lock(&dev->state_lock);
+    uint32_t st = atomic_load(&dev->state);
+    if (st != WG_DEVICE_STATE_DOWN) {
+        pthread_mutex_unlock(&dev->state_lock);
+        return WG_ERR_INVALID_ARGUMENT;
+    }
+    if (hooks)
+        dev->packet_hooks = *hooks;
+    else
+        memset(&dev->packet_hooks, 0, sizeof(dev->packet_hooks));
+    pthread_mutex_unlock(&dev->state_lock);
+    return WG_OK;
+}
+
 void wg_device_disable_roaming(wg_device_t *dev)
 {
     if (!dev)
