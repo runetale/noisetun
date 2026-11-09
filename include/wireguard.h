@@ -167,6 +167,35 @@ wg_error_t wg_uapi_set(wg_device_t *dev, const char *input, size_t len);
 void wg_device_disable_roaming(wg_device_t *dev);
 
 /* ────────────────────────────────────────
+ * Per-peer packet hooks
+ *
+ * For a host whose peers' addresses may coincide, which therefore has to
+ * tell them apart by key: each peer is given a stand-in address of the
+ * host's own as its allowed IP, and these hooks rewrite between the
+ * stand-in and the address the peer really uses.
+ *
+ * outbound is called on the TUN reader's thread for each packet after the
+ * allowed-IPs lookup has chosen `peer_key` and before the packet is
+ * staged or encrypted; inbound on a receive thread for each decrypted
+ * packet of `peer_key`'s, before its source is checked against the
+ * allowed IPs. Both may rewrite the `len` bytes in place but not change
+ * their length, and return false to drop the packet. They are called
+ * concurrently, so whatever they read must be safe to read that way.
+ *
+ * Set before wg_device_up() and not changed while the device is up.
+ * NULL, or a struct whose functions are NULL, means no hooks.
+ * ──────────────────────────────────────── */
+typedef struct {
+    bool (*outbound)(void *ctx, const uint8_t peer_key[WG_KEY_LEN], uint8_t *packet,
+                     size_t len);
+    bool (*inbound)(void *ctx, const uint8_t peer_key[WG_KEY_LEN], uint8_t *packet,
+                    size_t len);
+    void *ctx;
+} wg_packet_hooks_t;
+
+wg_error_t wg_device_set_packet_hooks(wg_device_t *dev, const wg_packet_hooks_t *hooks);
+
+/* ────────────────────────────────────────
  * Embedding: a tunnel on a TUN fd from the platform
  *
  * For apps on platforms that create the TUN device themselves and hand

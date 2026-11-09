@@ -609,6 +609,12 @@ void *wg_worker_tun_read(void *arg)
             }
             if (!peer || !atomic_load(&peer->is_running))
                 continue;
+            /* After the lookup and its cache, which keep the address the
+             * peer was chosen by. */
+            if (dev->packet_hooks.outbound &&
+                !dev->packet_hooks.outbound(dev->packet_hooks.ctx,
+                                            peer->handshake.remote_static, pkt, pkt_len))
+                continue;
 
             /* On peer change, release old keypair and look up new one. */
             if (peer != cur_peer) {

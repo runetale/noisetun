@@ -224,6 +224,9 @@ struct wg_device {
     int phys_cores;       /* physical core count (ncpu / threads_per_core) */
     int threads_per_core; /* 1 = no HT, 2 = HT */
     bool inline_crypto;   /* true: encrypt/decrypt inline (no worker threads) */
+
+    /* wg_device_set_packet_hooks(): set while down, read without a lock. */
+    wg_packet_hooks_t packet_hooks;
 #ifdef __linux__
     cpu_set_t send_mask; /* affinity mask for send path threads */
     cpu_set_t recv_mask; /* affinity mask for recv path threads */

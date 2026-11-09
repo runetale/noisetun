@@ -244,6 +244,54 @@ static void watched_close(void *ctx)
     g_orig_tun.close(ctx);
 }
 
+/* When set, dev0 knows dev1 by a stand-in address, and its packet hooks
+ * rewrite between that and dev1's own (wg_device_set_packet_hooks). */
+static bool g_stand_in;
+#define STAND_IN_IP 0xC6120002 /* 198.18.0.2 */
+static uint8_t g_hooked_key[WG_KEY_LEN];
+static atomic_int g_hook_wrong_key;
+
+static void rewrite_addr(uint8_t *pkt, size_t at, uint32_t ip)
+{
+    uint32_t be = htonl(ip);
+    memcpy(pkt + at, &be, 4);
+    pkt[10] = 0;
+    pkt[11] = 0;
+    uint16_t cksum = inet_checksum(pkt, IPV4_HEADER_SIZE, 0);
+    pkt[10] = (uint8_t)(cksum >> 8);
+    pkt[11] = (uint8_t)cksum;
+}
+
+static bool addr_is(const uint8_t *pkt, size_t at, uint32_t ip)
+{
+    uint32_t be = htonl(ip);
+    return memcmp(pkt + at, &be, 4) == 0;
+}
+
+static bool hook_out(void *ctx, const uint8_t peer_key[WG_KEY_LEN], uint8_t *pkt,
+                     size_t len)
+{
+    (void)ctx;
+    if (memcmp(peer_key, g_hooked_key, WG_KEY_LEN) != 0)
+        atomic_fetch_add(&g_hook_wrong_key, 1);
+    if (len < IPV4_HEADER_SIZE || (pkt[0] >> 4) != 4 || !addr_is(pkt, 16, STAND_IN_IP))
+        return false;
+    rewrite_addr(pkt, 16, 0x01000002);
+    return true;
+}
+
+static bool hook_in(void *ctx, const uint8_t peer_key[WG_KEY_LEN], uint8_t *pkt,
+                    size_t len)
+{
+    (void)ctx;
+    if (memcmp(peer_key, g_hooked_key, WG_KEY_LEN) != 0)
+        atomic_fetch_add(&g_hook_wrong_key, 1);
+    if (len < IPV4_HEADER_SIZE || (pkt[0] >> 4) != 4 || !addr_is(pkt, 12, 0x01000002))
+        return false;
+    rewrite_addr(pkt, 12, STAND_IN_IP);
+    return true;
+}
+
 static void setup_pair(test_pair_t *pair)
 {
     /* Generate keys for both devices. */
@@ -306,8 +354,12 @@ static void setup_pair(test_pair_t *pair)
         err = wg_peer_set_endpoint(peer, &ep);
         assert(err == WG_OK);
 
-        /* Add allowed IP: the other device's IP /32 */
-        uint32_t allowed_ip = htonl(pair->peer[other].ip);
+        /* Add allowed IP: the other device's IP /32, or for dev0 under
+         * g_stand_in the address it knows dev1 by. */
+        uint32_t allowed_ip =
+            htonl((i == 0 && g_stand_in) ? STAND_IN_IP : pair->peer[other].ip);
+        if (i == 0 && g_stand_in)
+            memcpy(g_hooked_key, pub[other].key, WG_KEY_LEN);
         err = wg_peer_add_allowed_ip(peer, &allowed_ip, 32, AF_INET);
         assert(err == WG_OK);
 
@@ -315,6 +367,12 @@ static void setup_pair(test_pair_t *pair)
         uint8_t allowed_ip6[16];
         ipv6_addr(allowed_ip6, other);
         err = wg_peer_add_allowed_ip(peer, allowed_ip6, 128, AF_INET6);
+        assert(err == WG_OK);
+    }
+
+    if (g_stand_in) {
+        wg_packet_hooks_t hooks = {.outbound = hook_out, .inbound = hook_in, .ctx = NULL};
+        err = wg_device_set_packet_hooks(pair->peer[0].dev, &hooks);
         assert(err == WG_OK);
     }
 
@@ -780,6 +838,58 @@ static void test_remove_peer_under_traffic(void)
     printf("PASS\n");
 }
 
+/* ────────────────────────────────────────
+ * Test: packet hooks
+ *
+ * dev0 reaches dev1 by a stand-in address that is dev1's allowed IP on
+ * dev0. The outbound hook puts dev1's own address in before the packet
+ * leaves, and the inbound hook puts the stand-in back as the source of
+ * what dev1 sends, which is then let in by the stand-in.
+ * ──────────────────────────────────────── */
+static void test_packet_hooks(void)
+{
+    g_stand_in = true;
+    atomic_store(&g_hook_wrong_key, 0);
+    test_pair_t pair;
+    setup_pair(&pair);
+
+    /* Not while the device is up. */
+    wg_packet_hooks_t none = {0};
+    assert(wg_device_set_packet_hooks(pair.peer[0].dev, &none) != WG_OK);
+
+    /* dev0 -> dev1, addressed to the stand-in; dev1 sees its own address. */
+    uint8_t pkt[128], want[128];
+    size_t len = build_icmpv4_ping(pkt, sizeof(pkt), STAND_IN_IP, pair.peer[0].ip, 7);
+    build_icmpv4_ping(want, sizeof(want), pair.peer[1].ip, pair.peer[0].ip, 7);
+    assert(wg_channel_tun_send(pair.peer[0].tun, pkt, len) == WG_OK);
+    uint8_t *got = NULL;
+    size_t got_len = 0;
+    assert(wg_channel_tun_recv_timeout(pair.peer[1].tun, &got, &got_len, TIMEOUT_MS) ==
+           WG_OK);
+    assert(got_len == len && memcmp(got, want, len) == 0);
+    free(got);
+
+    /* dev1 -> dev0 from its own address; dev0 sees it from the stand-in. */
+    len = build_icmpv4_ping(pkt, sizeof(pkt), pair.peer[0].ip, pair.peer[1].ip, 8);
+    build_icmpv4_ping(want, sizeof(want), pair.peer[0].ip, STAND_IN_IP, 8);
+    assert(wg_channel_tun_send(pair.peer[1].tun, pkt, len) == WG_OK);
+    assert(wg_channel_tun_recv_timeout(pair.peer[0].tun, &got, &got_len, TIMEOUT_MS) ==
+           WG_OK);
+    assert(got_len == len && memcmp(got, want, len) == 0);
+    free(got);
+
+    /* dev1 sending from an address other than its own is refused by the
+     * inbound hook, and so never reaches dev0's TUN. */
+    len = build_icmpv4_ping(pkt, sizeof(pkt), pair.peer[0].ip, 0x01000009, 10);
+    assert(wg_channel_tun_send(pair.peer[1].tun, pkt, len) == WG_OK);
+    assert(wg_channel_tun_recv_timeout(pair.peer[0].tun, &got, &got_len, 300) != WG_OK);
+
+    assert(atomic_load(&g_hook_wrong_key) == 0);
+    teardown_pair(&pair);
+    g_stand_in = false;
+    PASS("packet hooks");
+}
+
 int main(void)
 {
     if (sodium_init() < 0) {
@@ -799,6 +909,7 @@ int main(void)
     test_remove_and_readd_peer();
     test_remove_peer_under_traffic();
     test_close_joins_tun_reader_first();
+    test_packet_hooks();
 
     printf("All device ping-pong tests passed.\n");
     return 0;

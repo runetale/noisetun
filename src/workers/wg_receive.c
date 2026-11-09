@@ -326,6 +326,18 @@ static struct wg_peer *lookup_peer_for_src_packet(wg_device_t *dev, const uint8_
     return NULL;
 }
 
+/* The device's inbound packet hook, if it has one: false drops the packet.
+ * Before the source check, so a hook can put the packet's source into the
+ * address the peer is allowed by (wg_device_set_packet_hooks). */
+static inline bool inbound_hook(wg_device_t *dev, struct wg_peer *peer, uint8_t *packet,
+                                size_t len)
+{
+    if (!dev->packet_hooks.inbound)
+        return true;
+    return dev->packet_hooks.inbound(dev->packet_hooks.ctx, peer->handshake.remote_static,
+                                     packet, len);
+}
+
 /* ────────────────────────────────────────
  * keepKeyFreshReceiving
  *
@@ -430,6 +442,8 @@ static int drain_rx_order(wg_device_t *dev, struct wg_peer *peer, uint64_t *out_
 
         /* Source IP validation, on the IP packet without WireGuard's padding. */
         size_t ip_len = ip_packet_len(plaintext, pt_len);
+        if (ip_len && !inbound_hook(dev, peer, plaintext, ip_len))
+            ip_len = 0;
         struct wg_peer *allowed_peer =
             ip_len ? lookup_peer_for_src_packet(dev, plaintext, ip_len) : NULL;
 
@@ -870,6 +884,8 @@ static void recv_elem_inline(wg_device_t *dev, struct wg_peer *peer,
                                               WG_AEAD_TAG_SIZE);
         if (pt_len > 0) {
             size_t ip_len = ip_packet_len(plaintext, pt_len);
+            if (ip_len && !inbound_hook(dev, peer, plaintext, ip_len))
+                ip_len = 0;
             struct wg_peer *allowed =
                 ip_len ? lookup_peer_for_src_packet(dev, plaintext, ip_len) : NULL;
             if (allowed == peer) {
